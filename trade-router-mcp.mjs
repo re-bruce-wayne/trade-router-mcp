@@ -82,6 +82,23 @@ function signTxB58(swapTxB58) {
 
 // ── REST helpers ─────────────────────────────────────────────────────────────
 
+async function get(path, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${API_BASE}${path}${qs ? `?${qs}` : ''}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(url, { method: 'GET', signal: ctrl.signal });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${txt}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function post(path, body) {
   const timeoutMs = path.includes('holdings') ? 110000 : 30000;
   const ctrl = new AbortController();
@@ -164,6 +181,32 @@ function verifyOrderFilledWithRotation(msg) {
       }
       return true;
     }
+  }
+  return false;
+}
+
+// twap_execution: server signs order_id|order_type|execution_num|executions_total|status|token_address (SHA-256 then Ed25519)
+function verifyTwapExecution(msg, serverPubkeyB58) {
+  if (!serverPubkeyB58) return false;
+  const sigB58 = msg.server_signature;
+  if (!sigB58) return false;
+  const { order_id, order_type, execution_num, executions_total, status, token_address } = msg;
+  if (order_id == null || order_type == null || execution_num == null || executions_total == null || status == null || token_address == null) return false;
+  const s = `${order_id}|${order_type}|${execution_num}|${executions_total}|${status}|${token_address}`;
+  const digest = createHash('sha256').update(Buffer.from(s, 'utf-8')).digest();
+  try {
+    const sigBytes = bs58.decode(sigB58);
+    const pubkeyBytes = bs58.decode(serverPubkeyB58);
+    return nacl.sign.detached.verify(digest, sigBytes, pubkeyBytes);
+  } catch {
+    return false;
+  }
+}
+
+function verifyTwapExecutionWithRotation(msg) {
+  const keys = [SERVER_PUBKEY_B58, SERVER_PUBKEY_NEXT_B58].filter(Boolean);
+  for (const key of keys) {
+    if (verifyTwapExecution(msg, key)) return true;
   }
   return false;
 }
@@ -369,6 +412,25 @@ class WsManager {
       this._handleFill(msg);
     }
 
+    else if (t === 'twap_order_created') {
+      this._resolveInflight(t, msg);
+    }
+
+    else if (t === 'twap_execution') {
+      log('info', `→ twap_execution order_id=${msg.order_id} execution=${msg.execution_num}/${msg.executions_total}`);
+      this._handleTwapExecution(msg);
+    }
+
+    else if (t === 'twap_order_completed') {
+      log('info', `→ twap_order_completed order_id=${msg.order_id} executions=${msg.executions_completed}`);
+      this._resolveInflight(t, msg);
+    }
+
+    else if (t === 'twap_order_cancelled') {
+      this._resolveInflight(t, msg);
+      this._resolveInflight('order_cancelled', msg);  // so cancel_order call receives a response
+    }
+
     else if (t === 'error') {
       log('error', `← server error: ${msg.message}`);
       const first = this._firstInflight();
@@ -451,6 +513,61 @@ class WsManager {
       } catch (e) {
         entry.error = e.message;
         log('error', `Auto-submit failed for fill ${msg.order_id}: ${e.message}`);
+      }
+    }
+
+    this._fillLog.push(entry);
+    if (this._fillLog.length > 200) this._fillLog.shift();
+  }
+
+  async _handleTwapExecution(msg) {
+    const entry = { fill: msg, protect: null, error: null, ts: Date.now() / 1000 };
+
+    if (msg.status === 'error') {
+      log('warn', `twap_execution error order_id=${msg.order_id} execution=${msg.execution_num}: ${msg.error || 'unknown'}`);
+      this._fillLog.push(entry);
+      if (this._fillLog.length > 200) this._fillLog.shift();
+      return;
+    }
+
+    const sigB58 = msg.server_signature;
+    if (sigB58) {
+      if (!SERVER_PUBKEY_B58 && !SERVER_PUBKEY_NEXT_B58) {
+        entry.error = 'server_signature present but no server public key configured';
+        log('error', `twap_execution has server_signature but no pubkey configured — rejecting ${msg.order_id}`);
+        this._fillLog.push(entry);
+        if (this._fillLog.length > 200) this._fillLog.shift();
+        return;
+      }
+      if (!verifyTwapExecutionWithRotation(msg)) {
+        entry.error = 'server_signature verification failed';
+        log('error', `twap_execution server_signature FAILED — rejecting ${msg.order_id}`);
+        this._fillLog.push(entry);
+        if (this._fillLog.length > 200) this._fillLog.shift();
+        return;
+      }
+    } else if (REQUIRE_SERVER_SIG) {
+      entry.error = 'no server_signature present';
+      log('error', `twap_execution has no server_signature — rejecting ${msg.order_id}`);
+      this._fillLog.push(entry);
+      if (this._fillLog.length > 200) this._fillLog.shift();
+      return;
+    }
+
+    const swapTx = msg.data?.swap_tx;
+    if (!swapTx) {
+      log('warn', `twap_execution with no swap_tx — stored only`);
+    } else if (!PRIVATE_KEY_B58) {
+      log('info', `TWAP slice received; no private key set — stored in fill_log only`);
+    } else {
+      try {
+        const signedB64 = signTxB58(swapTx);
+        const protect = await post('/protect', { signed_tx_base64: signedB64 });
+        entry.protect = protect;
+        log('info', `Auto-submitted TWAP slice ${msg.order_id} #${msg.execution_num} → sig ${(protect.signature || '?').slice(0, 16)}…`);
+      } catch (e) {
+        entry.error = e.message;
+        log('error', `Auto-submit failed for TWAP slice ${msg.order_id} #${msg.execution_num}: ${e.message}`);
       }
     }
 
@@ -598,6 +715,29 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_mcap',
+    description: 'Get market cap (and price/pool) data for one or more token addresses. GET /mcap.',
+    inputSchema: {
+      type: 'object',
+      required: ['tokens'],
+      properties: {
+        tokens: { type: 'string', description: 'Comma-separated Solana mint addresses' },
+      },
+    },
+  },
+  {
+    name: 'get_flex_card',
+    description: 'Get the URL for a flex trade card PNG for a wallet and token. GET /flex. Returns the URL to display the image.',
+    inputSchema: {
+      type: 'object',
+      required: ['wallet_address', 'token_address'],
+      properties: {
+        wallet_address: { type: 'string' },
+        token_address: { type: 'string' },
+      },
+    },
+  },
+  {
     name: 'connect_websocket',
     description: 'Connect WS for a wallet and wait until registered (up to 25s). Call before placing orders.',
     inputSchema: {
@@ -657,6 +797,24 @@ const TOOLS = [
         holdings_percentage: { type: 'integer', minimum: 1, maximum: 10000 },
         slippage:            { type: 'integer', minimum: 100, maximum: 2500, default: 1500 },
         expiry_hours:        { type: 'integer', minimum: 1, maximum: 336, default: 144 },
+      },
+    },
+  },
+  {
+    name: 'place_twap_order',
+    description: 'Place a TWAP (time-weighted) buy or sell order. Splits total quantity into frequency slices over duration seconds. action: twap_buy|twap_sell.',
+    inputSchema: {
+      type: 'object',
+      required: ['wallet_address', 'token_address', 'action', 'frequency', 'duration'],
+      properties: {
+        wallet_address:       { type: 'string' },
+        token_address:        { type: 'string' },
+        action:               { type: 'string', enum: ['twap_buy', 'twap_sell'] },
+        frequency:            { type: 'integer', minimum: 1, maximum: 100, description: 'Number of executions' },
+        duration:             { type: 'integer', minimum: 60, description: 'Total run time in seconds (max 30 days)' },
+        quantity:             { type: 'integer', description: 'Total lamports (buy) or raw token units (sell)' },
+        holdings_percentage:  { type: 'integer', minimum: 1, maximum: 10000, description: 'Sell only: bps of holdings at creation' },
+        slippage:             { type: 'integer', minimum: 100, maximum: 2500, default: 500 },
       },
     },
   },
@@ -767,6 +925,19 @@ async function callTool(name, args) {
       return await post('/holdings', { wallet_address: args.wallet_address });
     }
 
+    case 'get_mcap': {
+      const tokens = typeof args.tokens === 'string' ? args.tokens : (args.tokens || []).join(',');
+      if (!tokens.trim()) return { error: 'tokens (comma-separated) required' };
+      return await get('/mcap', { tokens: tokens.trim() });
+    }
+
+    case 'get_flex_card': {
+      const { wallet_address, token_address } = args;
+      if (!wallet_address || !token_address) return { error: 'wallet_address and token_address required' };
+      const url = `${API_BASE}/flex?wallet_address=${encodeURIComponent(wallet_address)}&token_address=${encodeURIComponent(token_address)}`;
+      return { url, wallet_address, token_address };
+    }
+
     case 'connect_websocket': {
       const mgr = await getManagerRegistered(args.wallet_address);
       return {
@@ -812,6 +983,23 @@ async function callTool(name, args) {
       if (action === 'trailing_sell') payload.holdings_percentage = holdings_percentage;
       else payload.amount = amount;
       return await ws(wallet_address, payload, 'order_created');
+    }
+
+    case 'place_twap_order': {
+      const { wallet_address, token_address, action, frequency, duration, quantity, holdings_percentage, slippage = 500 } = args;
+      if (!['twap_buy', 'twap_sell'].includes(action)) return { error: "action must be 'twap_buy' or 'twap_sell'" };
+      if (action === 'twap_sell' && quantity == null && holdings_percentage == null) return { error: 'quantity or holdings_percentage required for twap_sell' };
+      if (action === 'twap_buy' && quantity == null) return { error: 'quantity (SOL lamports) required for twap_buy' };
+      if (!frequency || frequency < 1 || frequency > 100) return { error: 'frequency must be 1–100' };
+      if (!duration || duration < 60) return { error: 'duration must be >= 60 seconds' };
+      const payload = { action, token_address, frequency, duration, slippage };
+      if (action === 'twap_sell') {
+        if (quantity != null) payload.quantity = quantity;
+        else payload.holdings_percentage = holdings_percentage;
+      } else {
+        payload.quantity = quantity;
+      }
+      return await ws(wallet_address, payload, 'twap_order_created');
     }
 
     case 'list_orders': {
