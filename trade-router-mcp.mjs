@@ -802,7 +802,7 @@ const TOOLS = [
   },
   {
     name: 'place_twap_order',
-    description: 'Place a TWAP (time-weighted) buy or sell order. Splits total quantity into frequency slices over duration seconds. action: twap_buy|twap_sell.',
+    description: 'Place a TWAP (time-weighted) buy or sell order. Splits total amount into frequency slices over duration seconds. action: twap_buy|twap_sell.',
     inputSchema: {
       type: 'object',
       required: ['wallet_address', 'token_address', 'action', 'frequency', 'duration'],
@@ -812,9 +812,89 @@ const TOOLS = [
         action:               { type: 'string', enum: ['twap_buy', 'twap_sell'] },
         frequency:            { type: 'integer', minimum: 1, maximum: 100, description: 'Number of executions' },
         duration:             { type: 'integer', minimum: 60, description: 'Total run time in seconds (max 30 days)' },
-        quantity:             { type: 'integer', description: 'Total lamports (buy) or raw token units (sell)' },
+        amount:               { type: 'integer', description: 'Total lamports (buy) or raw token units (sell)' },
         holdings_percentage:  { type: 'integer', minimum: 1, maximum: 10000, description: 'Sell only: bps of holdings at creation' },
         slippage:             { type: 'integer', minimum: 100, maximum: 2500, default: 500 },
+      },
+    },
+  },
+  {
+    name: 'place_limit_twap_order',
+    description: 'Place a limit-then-TWAP order. Wait for limit target (bps), then execute via TWAP. action: limit_twap_sell|limit_twap_buy.',
+    inputSchema: {
+      type: 'object',
+      required: ['wallet_address', 'token_address', 'action', 'target', 'frequency', 'duration'],
+      properties: {
+        wallet_address:       { type: 'string' },
+        token_address:        { type: 'string' },
+        action:               { type: 'string', enum: ['limit_twap_sell', 'limit_twap_buy'] },
+        target:               { type: 'integer', minimum: 1, description: 'Target mcap bps vs entry' },
+        frequency:            { type: 'integer', minimum: 1, maximum: 100 },
+        duration:             { type: 'integer', minimum: 60 },
+        amount:               { type: 'integer', description: 'Lamports (buy) or raw token units (sell)' },
+        holdings_percentage:  { type: 'integer', minimum: 1, maximum: 10000, description: 'Sell only: bps' },
+        slippage:             { type: 'integer', minimum: 100, maximum: 2500, default: 500 },
+        expiry_hours:         { type: 'integer', minimum: 1, maximum: 336, default: 144 },
+      },
+    },
+  },
+  {
+    name: 'place_trailing_twap_order',
+    description: 'Place a trailing-then-TWAP order. When trail triggers, execute via TWAP. action: trailing_twap_sell|trailing_twap_buy.',
+    inputSchema: {
+      type: 'object',
+      required: ['wallet_address', 'token_address', 'action', 'trail', 'frequency', 'duration'],
+      properties: {
+        wallet_address:       { type: 'string' },
+        token_address:        { type: 'string' },
+        action:               { type: 'string', enum: ['trailing_twap_sell', 'trailing_twap_buy'] },
+        trail:                { type: 'integer', minimum: 1, description: 'Trail bps' },
+        frequency:            { type: 'integer', minimum: 1, maximum: 100 },
+        duration:             { type: 'integer', minimum: 60 },
+        amount:               { type: 'integer', description: 'Lamports (buy) or raw token units (sell)' },
+        holdings_percentage:  { type: 'integer', minimum: 1, maximum: 10000, description: 'Sell only: bps' },
+        slippage:             { type: 'integer', minimum: 100, maximum: 2500, default: 500 },
+        expiry_hours:         { type: 'integer', minimum: 1, maximum: 336, default: 144 },
+      },
+    },
+  },
+  {
+    name: 'place_limit_trailing_order',
+    description: 'Place a limit-then-trailing order. Wait for limit, then trailing phase; when trail triggers, single swap. action: limit_trailing_sell|limit_trailing_buy.',
+    inputSchema: {
+      type: 'object',
+      required: ['wallet_address', 'token_address', 'action', 'target', 'trail'],
+      properties: {
+        wallet_address:       { type: 'string' },
+        token_address:        { type: 'string' },
+        action:               { type: 'string', enum: ['limit_trailing_sell', 'limit_trailing_buy'] },
+        target:               { type: 'integer', minimum: 1 },
+        trail:                { type: 'integer', minimum: 1 },
+        amount:               { type: 'integer' },
+        holdings_percentage:  { type: 'integer', minimum: 1, maximum: 10000 },
+        slippage:             { type: 'integer', minimum: 100, maximum: 2500, default: 500 },
+        expiry_hours:         { type: 'integer', minimum: 1, maximum: 336, default: 144 },
+      },
+    },
+  },
+  {
+    name: 'place_limit_trailing_twap_order',
+    description: 'Place a limit-then-trailing-then-TWAP order. Limit → trail → on trail trigger, execute via TWAP. action: limit_trailing_twap_sell|limit_trailing_twap_buy.',
+    inputSchema: {
+      type: 'object',
+      required: ['wallet_address', 'token_address', 'action', 'target', 'trail', 'frequency', 'duration'],
+      properties: {
+        wallet_address:       { type: 'string' },
+        token_address:        { type: 'string' },
+        action:               { type: 'string', enum: ['limit_trailing_twap_sell', 'limit_trailing_twap_buy'] },
+        target:               { type: 'integer', minimum: 1 },
+        trail:                { type: 'integer', minimum: 1 },
+        frequency:            { type: 'integer', minimum: 1, maximum: 100 },
+        duration:             { type: 'integer', minimum: 60 },
+        amount:               { type: 'integer', description: 'Lamports (buy) or raw token units (sell)' },
+        holdings_percentage:  { type: 'integer', minimum: 1, maximum: 10000, description: 'Sell only: bps' },
+        slippage:             { type: 'integer', minimum: 100, maximum: 2500, default: 500 },
+        expiry_hours:         { type: 'integer', minimum: 1, maximum: 336, default: 144 },
       },
     },
   },
@@ -986,20 +1066,92 @@ async function callTool(name, args) {
     }
 
     case 'place_twap_order': {
-      const { wallet_address, token_address, action, frequency, duration, quantity, holdings_percentage, slippage = 500 } = args;
+      const { wallet_address, token_address, action, frequency, duration, amount, holdings_percentage, slippage = 500 } = args;
       if (!['twap_buy', 'twap_sell'].includes(action)) return { error: "action must be 'twap_buy' or 'twap_sell'" };
-      if (action === 'twap_sell' && quantity == null && holdings_percentage == null) return { error: 'quantity or holdings_percentage required for twap_sell' };
-      if (action === 'twap_buy' && quantity == null) return { error: 'quantity (SOL lamports) required for twap_buy' };
+      if (action === 'twap_sell' && amount == null && holdings_percentage == null) return { error: 'amount or holdings_percentage required for twap_sell' };
+      if (action === 'twap_buy' && amount == null) return { error: 'amount (SOL lamports) required for twap_buy' };
       if (!frequency || frequency < 1 || frequency > 100) return { error: 'frequency must be 1–100' };
       if (!duration || duration < 60) return { error: 'duration must be >= 60 seconds' };
       const payload = { action, token_address, frequency, duration, slippage };
       if (action === 'twap_sell') {
-        if (quantity != null) payload.quantity = quantity;
+        if (amount != null) payload.amount = amount;
         else payload.holdings_percentage = holdings_percentage;
       } else {
-        payload.quantity = quantity;
+        payload.amount = amount;
       }
       return await ws(wallet_address, payload, 'twap_order_created');
+    }
+
+    case 'place_limit_twap_order': {
+      const { wallet_address, token_address, action, target, frequency, duration, amount, holdings_percentage, slippage = 500, expiry_hours = 144 } = args;
+      if (!['limit_twap_sell', 'limit_twap_buy'].includes(action)) return { error: "action must be 'limit_twap_sell' or 'limit_twap_buy'" };
+      if (action === 'limit_twap_sell' && amount == null && holdings_percentage == null) return { error: 'amount or holdings_percentage required for limit_twap_sell' };
+      if (action === 'limit_twap_buy' && amount == null) return { error: 'amount (SOL lamports) required for limit_twap_buy' };
+      if (!target || target <= 0) return { error: 'target must be > 0' };
+      if (!frequency || frequency < 1 || frequency > 100) return { error: 'frequency must be 1–100' };
+      if (!duration || duration < 60) return { error: 'duration must be >= 60 seconds' };
+      const payload = { action, token_address, target, frequency, duration, slippage, expiry_hours };
+      if (action === 'limit_twap_sell') {
+        if (amount != null) payload.amount = amount;
+        else payload.holdings_percentage = holdings_percentage;
+      } else {
+        payload.amount = amount;
+      }
+      return await ws(wallet_address, payload, 'order_created');
+    }
+
+    case 'place_trailing_twap_order': {
+      const { wallet_address, token_address, action, trail, frequency, duration, amount, holdings_percentage, slippage = 500, expiry_hours = 144 } = args;
+      if (!['trailing_twap_sell', 'trailing_twap_buy'].includes(action)) return { error: "action must be 'trailing_twap_sell' or 'trailing_twap_buy'" };
+      if (action === 'trailing_twap_sell' && amount == null && holdings_percentage == null) return { error: 'amount or holdings_percentage required for trailing_twap_sell' };
+      if (action === 'trailing_twap_buy' && amount == null) return { error: 'amount (SOL lamports) required for trailing_twap_buy' };
+      if (!trail || trail <= 0) return { error: 'trail must be > 0' };
+      if (!frequency || frequency < 1 || frequency > 100) return { error: 'frequency must be 1–100' };
+      if (!duration || duration < 60) return { error: 'duration must be >= 60 seconds' };
+      const payload = { action, token_address, trail, frequency, duration, slippage, expiry_hours };
+      if (action === 'trailing_twap_sell') {
+        if (amount != null) payload.amount = amount;
+        else payload.holdings_percentage = holdings_percentage;
+      } else {
+        payload.amount = amount;
+      }
+      return await ws(wallet_address, payload, 'order_created');
+    }
+
+    case 'place_limit_trailing_order': {
+      const { wallet_address, token_address, action, target, trail, amount, holdings_percentage, slippage = 500, expiry_hours = 144 } = args;
+      if (!['limit_trailing_sell', 'limit_trailing_buy'].includes(action)) return { error: "action must be 'limit_trailing_sell' or 'limit_trailing_buy'" };
+      if (action === 'limit_trailing_sell' && amount == null && holdings_percentage == null) return { error: 'amount or holdings_percentage required for limit_trailing_sell' };
+      if (action === 'limit_trailing_buy' && amount == null) return { error: 'amount (SOL lamports) required for limit_trailing_buy' };
+      if (!target || target <= 0) return { error: 'target must be > 0' };
+      if (!trail || trail <= 0) return { error: 'trail must be > 0' };
+      const payload = { action, token_address, target, trail, slippage, expiry_hours };
+      if (action === 'limit_trailing_sell') {
+        if (amount != null) payload.amount = amount;
+        else payload.holdings_percentage = holdings_percentage;
+      } else {
+        payload.amount = amount;
+      }
+      return await ws(wallet_address, payload, 'order_created');
+    }
+
+    case 'place_limit_trailing_twap_order': {
+      const { wallet_address, token_address, action, target, trail, frequency, duration, amount, holdings_percentage, slippage = 500, expiry_hours = 144 } = args;
+      if (!['limit_trailing_twap_sell', 'limit_trailing_twap_buy'].includes(action)) return { error: "action must be 'limit_trailing_twap_sell' or 'limit_trailing_twap_buy'" };
+      if (action === 'limit_trailing_twap_sell' && amount == null && holdings_percentage == null) return { error: 'amount or holdings_percentage required for limit_trailing_twap_sell' };
+      if (action === 'limit_trailing_twap_buy' && amount == null) return { error: 'amount (SOL lamports) required for limit_trailing_twap_buy' };
+      if (!target || target <= 0) return { error: 'target must be > 0' };
+      if (!trail || trail <= 0) return { error: 'trail must be > 0' };
+      if (!frequency || frequency < 1 || frequency > 100) return { error: 'frequency must be 1–100' };
+      if (!duration || duration < 60) return { error: 'duration must be >= 60 seconds' };
+      const payload = { action, token_address, target, trail, frequency, duration, slippage, expiry_hours };
+      if (action === 'limit_trailing_twap_sell') {
+        if (amount != null) payload.amount = amount;
+        else payload.holdings_percentage = holdings_percentage;
+      } else {
+        payload.amount = amount;
+      }
+      return await ws(wallet_address, payload, 'order_created');
     }
 
     case 'list_orders': {
