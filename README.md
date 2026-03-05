@@ -62,6 +62,10 @@ Add the following to your `claude_desktop_config.json`:
 | `place_limit_order` | Place a limit buy or sell order |
 | `place_trailing_order` | Place a trailing buy or sell order |
 | `place_twap_order` | Place a TWAP (time-weighted) buy or sell order |
+| `place_limit_twap_order` | Place a limit-then-TWAP order (limit target then TWAP execution) |
+| `place_trailing_twap_order` | Place a trailing-then-TWAP order (trail trigger then TWAP execution) |
+| `place_limit_trailing_order` | Place a limit-then-trailing order (limit then trailing, single swap on trigger) |
+| `place_limit_trailing_twap_order` | Place a limit-then-trailing-then-TWAP order |
 | `list_orders` | List all active orders for a wallet |
 | `check_order` | Check the status of an order |
 | `cancel_order` | Cancel an active order |
