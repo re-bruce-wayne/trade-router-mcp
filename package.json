@@ -1,13 +1,13 @@
 {
   "name": "@traderouter/trade-router-mcp",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "repository": {
     "type": "git",
-    "url": "https://github.com/traderouter/trade-router-mcp.git"
+    "url": "https://github.com/TradeRouter/trade-router-mcp.git"
   },
   "description": "TradeRouter.ai MCP Server — Solana swap & limit order engine",
   "type": "module",
-  "mcpName": "io.github.traderouter/trade-router-mcp",
+  "mcpName": "io.github.TradeRouter/trade-router-mcp",
   "main": "trade-router-mcp.mjs",
   "bin": {
     "trade-router-mcp": "./trade-router-mcp.mjs"
